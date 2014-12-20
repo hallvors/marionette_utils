@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 from marionette import Marionette, wait, errors
-import base64, json, re, os, subprocess, time, urlparse, tldextract, difflib, argparse, glob, urllib2, datetime
+import base64, json, re, os, subprocess, time, urlparse, argparse
 import pdb
-from pprint import pprint
 
 # These variables can be overridden by command line arguments - see below
 dirname = '/home/hallvord/tmp/'
@@ -61,7 +60,7 @@ def get_url_from_bugpage(marionette_instance):
 			print 'Warning: exception when looking for %s' % selector
 			print e
 	return url
-	
+
 def extract_buglist_from_file(filename):
 	bugs = []
 	with open(filename, 'r') as handle:
@@ -121,63 +120,79 @@ def spoof_android_browser(m):
 
 
 def dual_driving():
-	mm = Marionette(host='localhost', port=2829)
-	mm.start_session()
-	md = Marionette(host='localhost', port=2828)
-	md.start_session()
-	md.set_search_timeout(1000) # especially required for webcompat.com JS-driven loading
-	ignored_bugs = []
-	buglist = []
-	for line in open(ignore_file, 'r'):
-		if line[0] == '#':
-			continue
-		ignored_bugs.append(line.strip())
-	if start_url:
-		print 'Starting from bug search %s' % start_url
-		md.navigate(start_url)
-		buglist = extract_buglist(md)
-	else:
-		buglist = extract_buglist_from_file(filename)
-	i = 1
-	for item in buglist:
-		if len(item) <= 1:
-			print 'Warning: we expect data format ID    Summary    URL, something is missing'
-			continue
-				
-		if '://' not in item[0]: # assuming this is Bugzilla data from a tab-separated file - in other words a plain bug number
-			md.navigate('https://bugzilla.mozilla.org/show_bug.cgi?id=%s' % item[0])
-		else: # we've got a bug tracker URL (right?)
-			md.navigate(item[0])
-		
-		if len(item) == 2: # URL is not in the data - let's load the bug first and try to get it from there
-			url = get_url_from_bugpage(md)
-		else:	
-			url = item[2]
-		if not url:
-			i+=1
-			continue
-		if i<start_at or url.strip() == '':
-			i+=1
-			continue
-		if '://' not in url:
-		    url = 'http://%s' % url
-		url = url.strip().rstrip('\r\n')
-		location = urlparse.urlparse(url)
-		hostname = location.hostname.rstrip('\r\n')
-		print str(i) + ' : ' + url
-		reset_spoof(mm)
-		mm.navigate(url)
-		print 'READY to analyze %s, \n%s' % (item[0], item[1])
-		options_menu(mm, url, md)
-	mm.delete_session()
-	md.delete_session()
+	try:
+		mm = Marionette(host='localhost', port=2829)
+		mm.start_session()
+		md = Marionette(host='localhost', port=2828)
+		md.start_session()
+		md.set_search_timeout(1000) # especially required for webcompat.com JS-driven loading
+		ignored_bugs = []
+		buglist = []
+		for line in open(ignore_file, 'r'):
+			if line[0] == '#':
+				continue
+			ignored_bugs.append(line.strip())
+		if start_url:
+			print 'Starting from bug search %s' % start_url
+			md.navigate(start_url)
+			buglist = extract_buglist(md)
+		else:
+			buglist = extract_buglist_from_file(filename)
+		i = 1
+		for item in buglist:
+			if len(item) <= 1:
+				print 'Warning: we expect data format ID    Summary    URL, something is missing'
+				continue
+			if i<start_at:
+				i+=1
+				continue
+			if '://' not in item[0]: # assuming this is Bugzilla data from a tab-separated file - in other words a plain bug number
+				md.navigate('https://bugzilla.mozilla.org/show_bug.cgi?id=%s' % item[0])
+			else: # we've got a bug tracker URL (right?)
+				md.navigate(item[0])
+
+			if len(item) == 2: # URL is not in the data - let's load the bug first and try to get it from there
+				url = get_url_from_bugpage(md)
+			else:
+				url = item[2]
+			if not url:
+				i+=1
+				continue
+			if url.strip() == '':
+				i+=1
+				continue
+			if '://' not in url:
+			    url = 'http://%s' % url
+			url = url.strip().rstrip('\r\n')
+			location = urlparse.urlparse(url)
+			hostname = location.hostname.rstrip('\r\n')
+			print str(i) + ' : ' + url
+			reset_spoof(mm)
+			try:
+				mm.navigate(url)
+				print 'READY to analyze %s, \n%s' % (item[0], item[1])
+			except:
+				print('could not load %s, try again by pressing u\n\n' % url)
+			options_menu(mm, url, md)
+		mm.delete_session()
+		md.delete_session()
+	except:
+		try:
+			mm.delete_session()
+		except:
+			pass
+		try:
+			md.delete_session()
+		except:
+			pass
 
 def options_menu(test_marionette_instance, url, marionette_desktop):
 	choice = raw_input("""
 Interact with the website if required,
-  * press SS, SA or SF to change UA to Safari, Android and Fx OS respectively 
-  * press R to reload, U for initial URL, S for screenshot, 
-  * SU [description] to add screenshot to bug, 
+  * press SS, SA or SF to change UA to Safari, Android and Fx OS respectively
+  * press R to reload, U for initial URL, S for screenshot,
+  * SU [description] to add screenshot to bug,
+  * JS code(); to run JS and see output,
   * RW [comment] to resolve WORKSFORME, RI [comment] for INVALID
   * press I [reason] to ignore bug for testing, C [comment] to comment and continue
   C to continue -> """)
@@ -213,7 +228,10 @@ Interact with the website if required,
 	elif choice == 'b':
 		test_marionette_instance.execute_script('history.back()')
 	elif choice == 'u':
-		test_marionette_instance.navigate(url)
+		try:
+			test_marionette_instance.navigate(url)
+		except:
+			print('\nerror loading %s, guess you need to move on to next bug..\n' % url)
 	elif choice == 's' or choice == 'su':
 		img_data = base64.b64decode(test_marionette_instance.screenshot())
 		f = open(def_img_file, 'wb')
@@ -241,7 +259,14 @@ Interact with the website if required,
 		marionette_desktop.execute_script('document.getElementById("bug_status").value = "RESOLVED"')
 		marionette_desktop.execute_script('document.getElementById("resolution").value = "%s"' %  resolutions[choice])
 		marionette_desktop.execute_script('document.getElementById("commit").click()')
-		
+	elif choice == 'js':
+		if extra_text:
+			try:
+				print(test_marionette_instance.execute_script('return ' + extra_text))
+			except:
+				print('That JS threw exception!')
+		else:
+			print('wot, you didn\'t type any code??')
 	elif choice == 'c':
 		if extra_text:
 			marionette_desktop.execute_script('document.getElementById("comment").value="%s"' % extra_text)
@@ -249,13 +274,13 @@ Interact with the website if required,
 			try:
 				while marionette_desktop.find_element('tag', 'body').text.index('Changes submitted for bug') == -1:
 					time.wait(1)
-			except e:
+			except Exception as e:
 				print e
 				time.wait(10)
 		return # 'continue' means no more menu recursion..
 
 	return options_menu(test_marionette_instance, url, marionette_desktop)
 
-	
+
 if __name__ == '__main__':
 	dual_driving()
