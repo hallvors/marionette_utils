@@ -43,7 +43,7 @@ def extract_buglist(marionette_instance):
 				bugs.append([item.get_attribute('href'), item.text])
 			if len(list) > 0:
 				break
-		except Exception, e:
+		except Exception as e:
 			print 'Warning: exception when looking for %s' % selector
 			print e
 	return bugs
@@ -176,7 +176,8 @@ def dual_driving():
 			options_menu(mm, url, md)
 		mm.delete_session()
 		md.delete_session()
-	except:
+	except Exception as err:
+		print err
 		try:
 			mm.delete_session()
 		except:
@@ -247,18 +248,18 @@ Interact with the website if required,
 				marionette_desktop.execute_script('gBrowser.contentDocument.getElementById("data").value = "%s"' % def_img_file)
 				marionette_desktop.set_context(marionette_desktop.CONTEXT_CONTENT)
 				if extra_text:
-					marionette_desktop.execute_script('document.getElementById("description").value="%s"' % extra_text)
+					insert_comment(marionette_desktop, extra_text)
 				else:
-					marionette_desktop.execute_script('document.getElementById("description").value="Screenshot from Flame device"')
+					insert_comment(marionette_desktop, "Screenshot from Flame device")
 				marionette_desktop.execute_script('document.getElementById("create").click()')
 			except:
 				print 'Sorry, failed when attempting to upload a screenshot in Bugzilla'
 	elif choice == 'rw' or choice == 'ri':
 		resolutions = {'rw':'WORKSFORME', 'ri':'INVALID'}
-		marionette_desktop.execute_script('document.getElementById("comment").value="%s"' % extra_text)
+		insert_comment(marionette_desktop, extra_text)
 		marionette_desktop.execute_script('document.getElementById("bug_status").value = "RESOLVED"')
 		marionette_desktop.execute_script('document.getElementById("resolution").value = "%s"' %  resolutions[choice])
-		marionette_desktop.execute_script('document.getElementById("commit").click()')
+		submit_bug_form(marionette_desktop)
 	elif choice == 'js':
 		if extra_text:
 			try:
@@ -268,19 +269,41 @@ Interact with the website if required,
 		else:
 			print('wot, you didn\'t type any code??')
 	elif choice == 'c':
+		pdb.set_trace()
 		if extra_text:
-			marionette_desktop.execute_script('document.getElementById("comment").value="%s"' % extra_text)
-			marionette_desktop.execute_script('document.getElementById("commit").click()')
+			insert_comment(marionette_desktop, extra_text)
+			submit_bug_form(marionette_desktop)
 			try:
 				while marionette_desktop.find_element('tag', 'body').text.index('Changes submitted for bug') == -1:
-					time.wait(1)
+					time.sleep(1)
 			except Exception as e:
 				print e
-				time.wait(10)
+				time.sleep(10)
 		return # 'continue' means no more menu recursion..
 
 	return options_menu(test_marionette_instance, url, marionette_desktop)
 
+def insert_comment(marionette_instance, text):
+	url = marionette_instance.get_url()
+	if 'bugzilla.mozilla' in url:
+		marionette_instance.execute_script('document.getElementById("comment").value="%s"' % text)
+	elif 'webcompat.com' in url:
+		marionette_instance.execute_script('document.getElementById("Comment-text").value="%s"' % text)
+	elif 'github.com' in url:
+		marionette_instance.execute_script('document.getElementsByName("comment[body]")[0].value="%s"' % text)
+	else:
+		raise 'don\'t know how to find comment field on this bug tracker ' + url
+
+def submit_bug_form(marionette_instance):
+	url = marionette_instance.get_url()
+	if 'bugzilla.mozilla' in url:
+		marionette_instance.execute_script('document.getElementById("commit").click()')
+	elif 'webcompat.com' in url:
+		marionette_instance.execute_script('document.getElementsByClassName("js-issue-comment-button")[0].click()')
+	elif 'github.com' in url:
+		marionette_instance.execute_script('document.querySelector("button.button.primary").click()')
+	else:
+		raise 'don\'t know how to find submit button on this bug tracker ' + url
 
 if __name__ == '__main__':
 	dual_driving()
