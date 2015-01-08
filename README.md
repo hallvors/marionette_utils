@@ -4,7 +4,7 @@ dualdriver.py: this script controls two browser instances, for example Firefox O
 
 Usage:
  * have adb setup, the Python marionette client, and a nightly build of Firefox OS with Marionette enabled
- * run "adb forward tcp:2828 tcp:2829"
+ * run "adb forward tcp:2829 tcp:2828"
  * run "python dualdriver.py -u " followed by the URL to a Bugzilla search you want to go through
 
 find-contact-and-comment.py: this script tries to find contact points for bugs on webcompat.com and add suitable comments (it lets you edit and submit the comments manually)
