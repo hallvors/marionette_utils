@@ -2,6 +2,7 @@
 from marionette import Marionette, wait, errors
 import base64, json, re, os, subprocess, time, urlparse, argparse
 import pdb
+import requests
 
 # These variables can be overridden by command line arguments - see below
 dirname = '/home/hallvord/tmp/'
@@ -11,6 +12,36 @@ ignore_file = '/home/hallvord/mozilla/extensions/sitecomptester/ignored_bugs.txt
 start_at = 0
 run_until = None
 start_url = None
+# if this is enabled, we always turn off general.useragent.site_specific_overrides
+disable_ua_overrides_by_default = True
+
+# These selectors are meant to enable integration with various bug trackers.
+# However, not all of them are used yet, and we probably need more. For example, we probably need
+# to define elements to wait for to figure out if a page is "loaded" - especially for webcompat.com because it's
+# a client-side JS beast.
+# Generally, support for Bugzilla is most advanced at this point.
+selector_map = {
+	"bugzilla":{
+		"bug_links": "td.bz_id_column a",
+		"comment_field":"",
+		"submit_button": "",
+		"url_ref":"#bz_url_edit_container a"
+	},
+	"webcompat":{
+		"bug_links": "p.IssueItem-header a",
+		"comment_field":"",
+		"submit_button": "",
+		"url_ref": "div.Issue-details a"
+	},
+	"github":{
+		"bug_links": "div.issue-title a.issue-title-link",
+		"comment_field":"",
+		"submit_button": "",
+		"url_ref": ".js-comment-body a"
+	}
+}
+
+def_ua = 'Mozilla/5.0 (Mobile; rv:36.0) Gecko/36.0 Firefox/36.0'
 
 parser = argparse.ArgumentParser(description=("Test a list of sites, find contact points"))
 parser.add_argument("-f", dest='datafile', type=str, help="a file of bug data (tab separated 'ID    desc    URL' format)", default=None)
@@ -36,29 +67,43 @@ if args.listurl:
 def extract_buglist(marionette_instance):
 	# bugzilla searches have  'td.bz_id_column a' . GitHub 'div.issue-title a.issue-title-link', webcompat.com 'p.IssueItem-header a'
 	bugs = []
-	for selector in ['td.bz_id_column a', 'div.issue-title a.issue-title-link', 'p.IssueItem-header a']:
-		try:
-			list = marionette_instance.find_elements('css selector', selector)
-			for item in list:
-				bugs.append([item.get_attribute('href'), item.text])
-			if len(list) > 0:
-				break
-		except Exception as e:
-			print 'Warning: exception when looking for %s' % selector
-			print e
+	tracker = bugtracker(marionette_instance)
+	selector = selector_map[tracker]['bug_links']
+	wait_until_ready(marionette_instance, selector)
+	try:
+		list = marionette_instance.find_elements('css selector', selector)
+		for item in list:
+			bugs.append([item.get_attribute('href'), item.text])
+	except Exception as e:
+		print 'Warning: exception when looking for %s' % selector
+		print e
 	return bugs
+
+def wait_until_ready(marionette_instance, selector):
+	wait_for_elm = wait.Wait(marionette_instance, timeout=270, interval=2, ignored_exceptions=errors.NoSuchElementException)
+	print('waiting for %s' % selector)
+	wait_for_elm.until(lambda marionette_instance: marionette_instance.find_element('css selector', selector))
+
+def bugtracker(marionette_instance):
+	url = marionette_instance.get_url()
+	if 'bugzilla.mozilla.org' in url:
+		return 'bugzilla'
+	elif 'webcompat.com' in url:
+		return 'webcompat'
+	elif 'github.com' in url:
+		return 'github'
 
 def get_url_from_bugpage(marionette_instance):
 	# Order of selectors: Bugzilla, GitHub, webcompat.com
 	url = None
-	for selector in ['#bz_url_edit_container a', '.js-comment-body a', 'div.Issue-details a']:
-		try:
-			item = marionette_instance.find_element('css selector', selector)
-			url = item.get_attribute('href')
-			break
-		except Exception, e:
-			print 'Warning: exception when looking for %s' % selector
-			print e
+	selector = selector_map[bugtracker(marionette_instance)]["url_ref"]
+	wait_until_ready(marionette_instance, selector)
+	try:
+		item = marionette_instance.find_element('css selector', selector)
+		url = item.get_attribute('href')
+	except Exception, e:
+		print 'Warning: exception when looking for %s' % selector
+		print e
 	return url
 
 def extract_buglist_from_file(filename):
@@ -96,12 +141,15 @@ def spoof_firefox_os(m):
     set_mozilla_pref(m, 'general.useragent.appName', 'Netscape')
     set_mozilla_pref(m, 'general.useragent.vendor', 'Mozilla')
     set_mozilla_pref(m, 'general.useragent.platform', '')
+    set_mozilla_pref(m, 'general.useragent.site_specific_overrides', False)
 
 def reset_spoof(m):
-    set_mozilla_pref(m, 'general.useragent.override', '')
-    set_mozilla_pref(m, 'general.useragent.appName', '')
+    set_mozilla_pref(m, 'general.useragent.override', def_ua)
+    set_mozilla_pref(m, 'general.useragent.appName', 'Netscape')
     set_mozilla_pref(m, 'general.useragent.vendor', '')
     set_mozilla_pref(m, 'general.useragent.platform', '')
+    if not disable_ua_overrides_by_default:
+        set_mozilla_pref(m, 'general.useragent.site_specific_overrides', True)
 
 def spoof_safari_ios(m):
     set_mozilla_pref(m, 'general.useragent.override', 'Mozilla/5.0 (iPhone; CPU iPhone OS 7_0 like Mac OS X) AppleWebKit/546.10 (KHTML, like Gecko) Version/6.0 Mobile/7E18WD Safari/8536.25')
@@ -109,6 +157,7 @@ def spoof_safari_ios(m):
     set_mozilla_pref(m, 'general.useragent.appVersion', '5.0 (iPhone; CPU iPhone OS 7_0 like Mac OS X) AppleWebKit/546.10 (KHTML, like Gecko) Version/6.0 Mobile/7E18WD Safari/8536.25')
     set_mozilla_pref(m, 'general.useragent.vendor', 'Apple Computer, Inc.')
     set_mozilla_pref(m, 'general.useragent.platform', 'iPhone')
+    set_mozilla_pref(m, 'general.useragent.site_specific_overrides', False)
 
 def spoof_android_browser(m):
     set_mozilla_pref(m, 'general.useragent.override', 'Mozilla/5.0 (Linux; U; Android 4.1.1; en-us; HTC_ONE_X Build/JRO03C) AppleWebKit/534.30 (KHTML, like Gecko) Version/4.0 Mobile Safari/534.30')
@@ -116,13 +165,28 @@ def spoof_android_browser(m):
     set_mozilla_pref(m, 'general.useragent.appVersion', '5.0 (Linux; U; Android 4.1.1; en-us; HTC_ONE_X Build/JRO03C) AppleWebKit/534.30 (KHTML, like Gecko) Version/4.0 Mobile Safari/534.30')
     set_mozilla_pref(m, 'general.useragent.vendor', 'Google Inc.')
     set_mozilla_pref(m, 'general.useragent.platform', 'Linux armv71')
+    set_mozilla_pref(m, 'general.useragent.site_specific_overrides', False)
 
-
+def set_proxy_server(marionette_instance, ip, port):
+	if ip:
+		set_mozilla_pref(marionette_instance, 'network.proxy.http', ip)
+		set_mozilla_pref(marionette_instance, 'network.proxy.http_port', port)
+		set_mozilla_pref(marionette_instance, 'network.proxy.ssl', ip)
+		set_mozilla_pref(marionette_instance, 'network.proxy.ssl_port', port)
+		set_mozilla_pref(marionette_instance, 'network.proxy.type', 1)
+	else:
+		set_mozilla_pref(marionette_instance, 'network.proxy.http', '')
+		set_mozilla_pref(marionette_instance, 'network.proxy.http_port', 0)
+		set_mozilla_pref(marionette_instance, 'network.proxy.ssl', '')
+		set_mozilla_pref(marionette_instance, 'network.proxy.ssl_port', 0)
+		set_mozilla_pref(marionette_instance, 'network.proxy.type', 0)
 
 def dual_driving():
 	try:
 		mm = Marionette(host='localhost', port=2829)
 		mm.start_session()
+		if disable_ua_overrides_by_default:
+			set_mozilla_pref(mm, 'general.useragent.site_specific_overrides', False)
 		md = Marionette(host='localhost', port=2828)
 		md.start_session()
 		md.set_search_timeout(1000) # especially required for webcompat.com JS-driven loading
@@ -139,6 +203,7 @@ def dual_driving():
 		else:
 			buglist = extract_buglist_from_file(filename)
 		i = 1
+		#print(len(buglist))
 		for item in buglist:
 			if len(item) <= 1:
 				print 'Warning: we expect data format ID    Summary    URL, something is missing'
@@ -193,8 +258,10 @@ Interact with the website if required,
   * press SS, SA or SF to change UA to Safari, Android and Fx OS respectively
   * press R to reload, U for initial URL, S for screenshot,
   * SU [description] to add screenshot to bug,
+  * FC to look for contact points, HC to check headers,
   * JS code(); to run JS and see output,
-  * RW [comment] to resolve WORKSFORME, RI [comment] for INVALID
+  * RW [comment] to resolve WORKSFORME, RI [comment] for INVALID, RF [comment] for fixed
+  * PROXY ip:port to set a proxy - PROXY without arguments to remove
   * press I [reason] to ignore bug for testing, C [comment] to comment and continue
   C to continue -> """)
 	extra_text = ''
@@ -243,19 +310,22 @@ Interact with the website if required,
 			try:
 				marionette_desktop.find_element('css selector', 'a[href*="attachment.cgi?bugid="]').click()
 				while 'attachment.cgi' not in marionette_desktop.get_url():
-					time.sleep(1)
+					time.sleep(2)
+				wait_until_ready(marionette_desktop, 'input#data')
 				marionette_desktop.set_context(marionette_desktop.CONTEXT_CHROME)
 				marionette_desktop.execute_script('gBrowser.contentDocument.getElementById("data").value = "%s"' % def_img_file)
 				marionette_desktop.set_context(marionette_desktop.CONTEXT_CONTENT)
 				if extra_text:
-					insert_comment(marionette_desktop, extra_text)
+					marionette_desktop.execute_script('document.getElementById("description").value = "%s"' % extra_text)
+					#insert_comment(marionette_desktop, extra_text)
 				else:
-					insert_comment(marionette_desktop, "Screenshot from Flame device")
+					marionette_desktop.execute_script('document.getElementById("description").value = "%s"' % "Screenshot from Flame smartphone")
+					#insert_comment(marionette_desktop, "Screenshot from Flame device")
 				marionette_desktop.execute_script('document.getElementById("create").click()')
 			except:
 				print 'Sorry, failed when attempting to upload a screenshot in Bugzilla'
-	elif choice == 'rw' or choice == 'ri':
-		resolutions = {'rw':'WORKSFORME', 'ri':'INVALID'}
+	elif choice == 'rw' or choice == 'ri' or choice == 'rf':
+		resolutions = {'rw':'WORKSFORME', 'ri':'INVALID', 'rf': 'FIXED'}
 		insert_comment(marionette_desktop, extra_text)
 		marionette_desktop.execute_script('document.getElementById("bug_status").value = "RESOLVED"')
 		marionette_desktop.execute_script('document.getElementById("resolution").value = "%s"' %  resolutions[choice])
@@ -268,8 +338,41 @@ Interact with the website if required,
 				print('That JS threw exception!')
 		else:
 			print('wot, you didn\'t type any code??')
-	elif choice == 'c':
+	elif choice == 'fc':
 		pdb.set_trace()
+		check_results = {}
+		look_for_contact_links(test_marionette_instance, check_results)
+		# Some sites have special pages dedicated to their social media presence, or limit contact info to the "about" page..
+		
+		for keyword in ['social', 'about', 'company', 'twitter', 'facebook']:
+			elm = find_elem(test_marionette_instance, {"selector": "*[href*='%s'" % keyword})
+			if elm:
+				test_marionette_instance.navigate(elm.get_attribute('href'))
+				look_for_contact_links(test_marionette_instance, check_results)
+				test_marionette_instance.go_back()
+		contact_desc = []
+		for key in check_results.keys():
+			val = check_results[key]
+			if val:
+				contact_desc.append("%s: %s" % (key.capitalize(),val['url']))
+			if len(contact_desc):
+				insert_comment(marionette_desktop, "If we're going to contact them, here are some possible contact points:\n" + ("\n".join(contact_desc)))
+	elif choice == 'hc':
+		header_check_data = check_url(url)
+		if header_check_data:
+			header_check_data = "\n".join(header_check_data)
+			insert_comment(marionette_desktop, header_check_data)
+	elif choice == 'proxy':
+		if extra_text:
+			ip_port = extra_text.split(':')
+			if len(ip_port) == 2:
+				set_proxy_server(test_marionette_instance, ip_port[0], int(ip_port[1]))
+			else:
+				print('ERROR: wrong arguments to proxy command - try ip:port')
+		else:
+			set_proxy_server(test_marionette_instance, None, None)
+	elif choice == 'c':
+		#pdb.set_trace()
 		if extra_text:
 			insert_comment(marionette_desktop, extra_text)
 			submit_bug_form(marionette_desktop)
@@ -284,26 +387,221 @@ Interact with the website if required,
 	return options_menu(test_marionette_instance, url, marionette_desktop)
 
 def insert_comment(marionette_instance, text):
-	url = marionette_instance.get_url()
-	if 'bugzilla.mozilla' in url:
+	tracker = bugtracker(marionette_instance)
+	text = text.replace('"', '\\"')
+	text = text.replace("\n", "\\n")
+	if tracker == 'bugzilla':
 		marionette_instance.execute_script('document.getElementById("comment").value="%s"' % text)
-	elif 'webcompat.com' in url:
+	elif tracker == 'webcompat':
 		marionette_instance.execute_script('document.getElementById("Comment-text").value="%s"' % text)
-	elif 'github.com' in url:
+	elif tracker == 'github':
 		marionette_instance.execute_script('document.getElementsByName("comment[body]")[0].value="%s"' % text)
 	else:
 		raise 'don\'t know how to find comment field on this bug tracker ' + url
 
 def submit_bug_form(marionette_instance):
-	url = marionette_instance.get_url()
-	if 'bugzilla.mozilla' in url:
+	tracker = bugtracker(marionette_instance)
+	if tracker == 'bugzilla':
 		marionette_instance.execute_script('document.getElementById("commit").click()')
-	elif 'webcompat.com' in url:
+	elif tracker == 'webcompat':
 		marionette_instance.execute_script('document.getElementsByClassName("js-issue-comment-button")[0].click()')
-	elif 'github.com' in url:
+	elif tracker == 'github':
 		marionette_instance.execute_script('document.querySelector("button.button.primary").click()')
 	else:
 		raise 'don\'t know how to find submit button on this bug tracker ' + url
+
+
+def look_for_contact_links(m, check_results):
+    # looking for mailto: links
+    elm = find_elem(m, {"selector": "a[href^='mailto:']"})
+    if elm:
+        check_results["mail"] = elm.get_attribute('href')
+        if check_results["mail"]:# remove mailto: prefix
+            check_results["mail"] = {"mail": check_results["mail"][7:], "source_page": m.get_url()}
+
+    for text in ['contact', 'feedback', 'kundenservice', 'kontakt', 'kundeservice', 'help', 'webmaster']:
+        elm = find_elem(m, {"linktext": text})
+        if elm:
+            check_results["contactlink"] = {"url": elm.get_attribute("href"), "source_page": m.get_url()}
+            break
+        else:
+            breakelm = find_elem(m, {"linktext": text.capitalize()})
+            if elm:
+                check_results["contactlink"] = {"url": elm.get_attribute("href"), "source_page": m.get_url()}
+                break
+        elm = find_elem(m, {"selector":  "*[href*='%s']" % text})
+        if elm:
+            check_results["contactlink"] = {"url": elm.get_attribute("href"), "source_page": m.get_url()}
+            break
+
+
+    elm = find_elem(m, {"selector": "*[href*='twitter.com/']"})
+    if elm:
+        check_results["twitter"] = {"url": elm.get_attribute("href"), "source_page": m.get_url()}
+
+    elm = find_elem(m, {"selector": "*[href*='facebook.com/']"})
+    if elm:
+        check_results["facebook"] = {"url": elm.get_attribute("href"), "source_page": m.get_url()}
+
+    elm = find_elem(m, {"selector": "*[href*='plus.google']"})
+    if elm:
+        check_results["google+"] = {"url": elm.get_attribute("href"), "source_page": m.get_url()}
+
+    elm = find_elem(m, {"selector": "*[href*='linkedin.']"})
+    if elm:
+        check_results["linkedin"] = {"url": elm.get_attribute("href"), "source_page": m.get_url()}
+
+    elm = find_elem(m, {"selector": "form[action*='contact']"})
+    if "contactform" in check_results and check_results["contactform"] is '' and elm:
+        check_results["contactform"] = {"url": m.get_url(), "source_page": m.get_url()}
+
+
+def wait_for_readystate_complete(marionette_instance):
+    for x in xrange(1,10):
+        s = marionette_instance.execute_script('return document.readyState')
+        if 'complete' not in s:
+            print 'sleeping because readyState is now '+s + ' (' + str(x) + '/10)'
+            time.sleep(5)
+    # readyState is now complete. Let's check if the BODY element is 'displayed'
+    for x in xrange(1,10):
+        # if we have a FRAMESET element, we should skip this check
+        elm = find_elem(marionette_instance, {"selector":"frameset"})
+        if elm:
+            time.sleep(4)
+            return
+        elm = find_elem(marionette_instance, {"selector":"body"})
+        if elm and elm.is_displayed():
+            return
+        else:
+            print 'sleeping because body is not shown yet  (' + str(x) + '/10)'
+            time.sleep(5)
+
+
+
+
+def find_elem(marionette_instance, targets):
+    """
+    This method takes a list of objects with id and/or name and/or selector properties
+    It returns the first matching element
+    [{"id":"foo", "name":"bar", "selector":"body nav ol"}]
+    """
+    if not isinstance(targets, list):
+        targets = [targets]
+    for target in targets:
+        if 'id' in target:
+            #print 'id '+ target['id']
+            try:
+                return marionette_instance.find_element('id', target['id'])
+            except:
+                pass
+        if 'name' in target:
+            #print 'name '+target['name']
+            try:
+                return marionette_instance.find_element('name', target['name'])
+            except:
+                pass
+        if 'selector' in target:
+            #print 'selector '+target['selector']
+            try:
+                return marionette_instance.find_element('css selector', target['selector'])
+            except:
+                pass
+        if 'linktext' in target:
+            try:
+                return marionette_instance.find_element('partial link text', target['linktext'])
+            except:
+                pass
+
+UAS = {
+    "b2g": "Mozilla/5.0 (Mobile; rv:29.0) Gecko/29.0 Firefox/29.0",
+    "ios": "Mozilla/5.0 (iPhone; CPU iPhone OS 6_0 like Mac OS X) AppleWebKit/536.26 (KHTML, like Gecko) Version/6.0 Mobile/10A5376e Safari/8536.25",
+    "fxa": "Mozilla/5.0 (Android; Mobile; rv:26.0) Gecko/26.0 Firefox/26.0"
+}
+
+
+def make_request(url, ua):
+    session = requests.Session()
+    session.headers.update({'User-Agent': ua})
+    session.headers.update({'Cookies': None})
+    session.headers.update({'Cache-Control': 'no-cache, must-revalidate'})
+    print 'Will now request %s with UA %s'%(url, ua)
+    r = session.get(url, allow_redirects=False, verify=False)
+    return r
+
+
+def dump(response, output):
+    wanted_headers = ['content-length', 'location', 'content-type']
+    output.append("Response for: '{}'\n".format(response.request.headers['user-agent']))
+    output.append("Response Status: {}\n".format(response.status_code))
+    for key, value in response.headers.iteritems():
+        if key in wanted_headers:
+            output.append("{}: {}\n".format(key, value))
+    output.append("\n")
+
+def check_url(url, iteration=0, orig_url = ''):
+    responses = []
+    if re.search('^/', url) and orig_url != '': # We're redirected to a relative URL..
+        url = urljoin(orig_url, url)
+    for ua in UAS.itervalues():
+        response = make_request(url, ua)
+        responses.append(response)
+        # dump(response)
+    # Now compare selected responses..
+    output = []
+    try:
+        if not 'content-length' in responses[0].headers:
+            responses[0].headers['content-length'] = 0
+        if not 'content-length' in responses[1].headers:
+            responses[1].headers['content-length'] = 0
+        if not 'content-length' in responses[2].headers:
+            responses[2].headers['content-length'] = 0
+        biggest_cl = max(int(responses[0].headers['content-length']), int(responses[1].headers['content-length']), int(responses[2].headers['content-length']))
+        smallest_cl = min(int(responses[0].headers['content-length']), int(responses[1].headers['content-length']), int(responses[2].headers['content-length']))
+        difference = abs(biggest_cl - smallest_cl)
+        if biggest_cl > 0:
+            if int(float(difference) / float(biggest_cl)*100 ) > 10:
+                output.append('Significant difference in source code:\nSmallest response has Content-Length: '+str(smallest_cl))
+                output.append('\nLargest response has Content-Length: '+str(biggest_cl)+'\n')
+    except Exception,e:
+        print 'Exception 1'
+        print e
+        pass
+    try:
+        if 'location' in responses[0].headers and not 'location' in responses[1].headers:
+            output.append('\nFirefox OS is redirected to '+responses[0].headers['location']+', Firefox for Android not redirected\n')
+        elif 'location' in responses[1].headers and not 'location' in responses[0].headers:
+            output.append('\nFirefox Android is redirected to %s, Firefox OS not redirected' % str(responses[1].headers['location']))
+        elif 'location' in responses[1].headers and 'location' in responses[0].headers:
+            if responses[1].headers['location'] != responses[0].headers['location']:
+                output.append('\nFirefox OS is redirected to '+responses[0].headers['location']+', Firefox for Android is redirected to '+responses[1].headers['location'])
+            elif responses[1].headers['location'] == responses[0].headers['location']:
+                if iteration == 0: # follow redirects only once
+                    return check_url(responses[1].headers['location'], iteration+1, url)
+
+        if 'location' in responses[0].headers and not 'location' in responses[2].headers:
+            output.append('\nFirefox OS is redirected to '+responses[0].headers['location']+', Safari on iPhone not redirected\n')
+        elif 'location' in responses[2].headers and not 'location' in responses[0].headers:
+            output.append('\nSafari on iPhone is redirected to %s, Firefox OS not redirected' % str(responses[2].headers['location']))
+        elif 'location' in responses[2].headers and 'location' in responses[0].headers:
+            if responses[2].headers['location'] != responses[0].headers['location']:
+                output.append('\nFirefox OS is redirected to '+responses[0].headers['location']+', Safari on iPhone is redirected to '+responses[2].headers['location'])
+            elif responses[2].headers['location'] == responses[0].headers['location']:
+                if iteration < 2: # follow redirects only once
+                    return check_url(responses[2].headers['location'], iteration+1, url)
+
+        if len(output)>0:
+            output.append('\n\nSelected HTTP response headers (Firefox OS, Firefox on Android, Safari on iPhone):\n\n')
+            dump(responses[0], output)
+            dump(responses[1], output)
+            dump(responses[2], output)
+    except Exception,e:
+        print 'Exception 2'
+        print e
+        return []
+
+    return output
+
+
 
 if __name__ == '__main__':
 	dual_driving()
