@@ -187,6 +187,8 @@ def dual_driving():
 		mm.start_session()
 		if disable_ua_overrides_by_default:
 			set_mozilla_pref(mm, 'general.useragent.site_specific_overrides', False)
+			set_mozilla_pref(mm, 'general.useragent.updates.enabled', False)
+			
 		md = Marionette(host='localhost', port=2828)
 		md.start_session()
 		md.set_search_timeout(1000) # especially required for webcompat.com JS-driven loading
@@ -265,6 +267,9 @@ Interact with the website if required,
   * press I [reason] to ignore bug for testing, C [comment] to comment and continue
   C to continue -> """)
 	extra_text = ''
+	bug_id = re.findall(r'\d+', marionette_desktop.get_url())
+	if bug_id:
+		bug_id = bug_id[0]
 	if ' ' in choice: # this supports entering comments directly after the argument
 		extra_text = choice[choice.index(' ')+1:]
 		choice = choice[:choice.index(' ')]
@@ -301,14 +306,27 @@ Interact with the website if required,
 		except:
 			print('\nerror loading %s, guess you need to move on to next bug..\n' % url)
 	elif choice == 's' or choice == 'su':
-		img_data = base64.b64decode(test_marionette_instance.screenshot())
+		# I want a screenshot of the viewport. For this purpose, I consider that better than getting the full page
+		# However, WebDriver spec says implementations *should* do the full page thing, and AFAIK there's no convenient way
+		# to opt-in to only take the viewport..
+		overlay_elm = None
+		try:
+			test_marionette_instance.execute_script('(function(){var elm=document.createElement(\'overlay\');elm.setAttribute(\'style\', \'display:block; position:fixed;top:0;left:0;right:0;bottom:0\');document.body.appendChild(elm)})()')
+			overlay_elm = test_marionette_instance.find_elements('tag name', 'overlay')
+		except:
+			pass
+		if overlay_elm:
+			overlay_elm = overlay_elm[0]
+			img_data = base64.b64decode(test_marionette_instance.screenshot(element=overlay_elm))
+		else:
+			img_data = base64.b64decode(test_marionette_instance.screenshot())
 		f = open(def_img_file, 'wb')
 		f.write(img_data)
 		f.close()
 		print 'Saved as %s' % def_img_file
 		if choice == 'su':
 			try:
-				marionette_desktop.find_element('css selector', 'a[href*="attachment.cgi?bugid="]').click()
+				marionette_desktop.find_element('css selector', 'a[href*="attachment.cgi?bugid=%s&action=enter"]' % bug_id ).click()
 				while 'attachment.cgi' not in marionette_desktop.get_url():
 					time.sleep(2)
 				wait_until_ready(marionette_desktop, 'input#data')
