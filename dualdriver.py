@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
-from marionette import Marionette, wait, errors
-import base64, json, re, os, subprocess, time, urlparse, argparse
+from marionette import Marionette
+from marionette_driver import wait, errors
+import base64, json, re, os, subprocess, shlex, time, urlparse, argparse
 import pdb
 import requests
-
+import subprocess
 # These variables can be overridden by command line arguments - see below
 dirname = '/home/hallvord/tmp/'
 filename = dirname + 'todo.csv'
@@ -23,21 +24,25 @@ disable_ua_overrides_by_default = True
 selector_map = {
 	"bugzilla":{
 		"bug_links": "td.bz_id_column a",
-		"comment_field":"",
-		"submit_button": "",
+		"comment_field":"textarea#comment",
+		"submit_button": "input#commit",
 		"url_ref":"#bz_url_edit_container a"
 	},
 	"webcompat":{
-		"bug_links": "p.IssueItem-header a",
-		"comment_field":"",
-		"submit_button": "",
-		"url_ref": "div.Issue-details a"
+		"bug_links": "p.wc-IssueItem-header a",
+		"comment_field":"textarea.wc-Comment-wrapper.wc-Comment-text",
+		"submit_button": "button.js-issue-comment-button",
+		"submit_close_button": "button.js-issue-state-button",
+		"url_ref": "div.wc-IssueDetail-details a",
+		"upload_input": "input#image"
 	},
 	"github":{
 		"bug_links": "div.issue-title a.issue-title-link",
-		"comment_field":"",
-		"submit_button": "",
-		"url_ref": ".js-comment-body a"
+		"comment_field":".js-new-comment-form textarea#new_comment_field",
+		"submit_button": ".js-new-comment-form button.btn-primary",
+		"submit_close_button":"button[name=\"comment_and_close\"]",
+		"url_ref": ".js-comment-body a",
+		"upload_input": "input.manual-file-chooser"
 	}
 }
 
@@ -50,6 +55,7 @@ parser.add_argument("-i", dest='index', type=int, help="the index in the list of
 parser.add_argument("-s", dest='start_at', type=int, help="start at a certain index in list, 0-based", default=0)
 parser.add_argument("-n", dest='num', type=int, help="how many entries to run through, 0-based", default=0)
 args = parser.parse_args()
+
 if args.index:
     start_at = args.index
     run_until = args.index
@@ -82,6 +88,7 @@ def extract_buglist(marionette_instance):
 def wait_until_ready(marionette_instance, selector):
 	wait_for_elm = wait.Wait(marionette_instance, timeout=270, interval=2, ignored_exceptions=errors.NoSuchElementException)
 	print('waiting for %s' % selector)
+	#pdb.set_trace()
 	wait_for_elm.until(lambda marionette_instance: marionette_instance.find_element('css selector', selector))
 
 def bugtracker(marionette_instance):
@@ -167,6 +174,27 @@ def spoof_android_browser(m):
     set_mozilla_pref(m, 'general.useragent.platform', 'Linux armv71')
     set_mozilla_pref(m, 'general.useragent.site_specific_overrides', False)
 
+def get_device_map():
+	device_data_ar = subprocess.Popen('adb devices -l', shell=True, stdout=subprocess.PIPE).stdout.read().splitlines()
+	device_data = {}
+	#356cd085               device usb:1-8 product:flame model:flame device:flame
+	#SH24SW104069           device usb:1-7 product:htc_europe model:HTC_One_X device:endeavoru
+	rx = re.compile('(\S*)\s+device usb:(\S+) product:(\S+) model:(\S+) device:(\S+)')
+	for dev_str in device_data_ar:
+		m = rx.search(dev_str)
+		if m:
+			device_data[m.group(1)] = {
+				'device usb': m.group(2),
+				'product': m.group(3),
+				'model': m.group(4),
+				'device': m.group(5)
+			}
+			# Right now the script works with two device (types):
+			# Firefox OS "Flame" and "something else"
+			device_data[m.group(1)]['isFxOS'] = 'flame' in device_data[m.group(1)]['product']
+			device_data[m.group(1)]['isAndroid'] = not device_data[m.group(1)]['isFxOS']
+	return device_data
+
 def set_proxy_server(marionette_instance, ip, port):
 	if ip:
 		set_mozilla_pref(marionette_instance, 'network.proxy.http', ip)
@@ -183,17 +211,21 @@ def set_proxy_server(marionette_instance, ip, port):
 
 def dual_driving():
 	try:
+		print('Will connect to mobile..')
 		mm = Marionette(host='localhost', port=2829)
 		mm.start_session()
 		if disable_ua_overrides_by_default:
 			set_mozilla_pref(mm, 'general.useragent.site_specific_overrides', False)
 			set_mozilla_pref(mm, 'general.useragent.updates.enabled', False)
 			
+		print('Will connect to desktop...')
 		md = Marionette(host='localhost', port=2828)
 		md.start_session()
 		md.set_search_timeout(1000) # especially required for webcompat.com JS-driven loading
 		ignored_bugs = []
 		buglist = []
+		device_map = get_device_map()
+
 		for line in open(ignore_file, 'r'):
 			if line[0] == '#':
 				continue
@@ -213,9 +245,15 @@ def dual_driving():
 			if i<start_at:
 				i+=1
 				continue
+			buglink = ''
 			if '://' not in item[0]: # assuming this is Bugzilla data from a tab-separated file - in other words a plain bug number
-				md.navigate('https://bugzilla.mozilla.org/show_bug.cgi?id=%s' % item[0])
+				# TODO: will we ever process lists of webcompat.com "plain numbers"??
+				buglink = 'https://bugzilla.mozilla.org/show_bug.cgi?id=%s' % item[0]
 			else: # we've got a bug tracker URL (right?)
+				buglink = item[0]
+			# users who have bugzilla's "load next bug in search" don't need an extra navigate() call
+			if buglink not in md.get_url():
+				print('Item %s, Loading bug %s'%(i,item[0]))
 				md.navigate(item[0])
 
 			if len(item) == 2: # URL is not in the data - let's load the bug first and try to get it from there
@@ -237,10 +275,11 @@ def dual_driving():
 			reset_spoof(mm)
 			try:
 				mm.navigate(url)
+				try_to_launch_url_in_android(device_map, url)
 				print 'READY to analyze %s, \n%s' % (item[0], item[1])
 			except:
 				print('could not load %s, try again by pressing u\n\n' % url)
-			options_menu(mm, url, md)
+			options_menu(mm, url, md, device_map)
 		mm.delete_session()
 		md.delete_session()
 	except Exception as err:
@@ -254,11 +293,12 @@ def dual_driving():
 		except:
 			pass
 
-def options_menu(test_marionette_instance, url, marionette_desktop):
+def options_menu(test_marionette_instance, url, marionette_desktop, device_map):
 	choice = raw_input("""
 Interact with the website if required,
   * press SS, SA or SF to change UA to Safari, Android and Fx OS respectively
-  * press R to reload, U for initial URL, S for screenshot,
+  * press R to reload, U for initial URL, U new_url to load a different URL
+  * S for screenshot,
   * SU [description] to add screenshot to bug,
   * FC to look for contact points, HC to check headers,
   * JS code(); to run JS and see output,
@@ -267,7 +307,10 @@ Interact with the website if required,
   * press I [reason] to ignore bug for testing, C [comment] to comment and continue
   C to continue -> """)
 	extra_text = ''
+	# sometimes one types initial space by mistake, ignore it
+	choice = choice.lstrip()
 	bug_id = re.findall(r'\d+', marionette_desktop.get_url())
+	tracker = bugtracker(marionette_desktop)
 	if bug_id:
 		bug_id = bug_id[0]
 	if ' ' in choice: # this supports entering comments directly after the argument
@@ -298,71 +341,126 @@ Interact with the website if required,
 		ignore_f.close()
 	elif choice == 'r':
 		test_marionette_instance.execute_script('location.reload(true)')
+		try_to_launch_url_in_android(device_map, 'javascript:location.reload(true)')
 	elif choice == 'b':
 		test_marionette_instance.execute_script('history.back()')
+		try_to_launch_url_in_android(device_map, 'javascript:history.back()')
 	elif choice == 'u':
 		try:
-			test_marionette_instance.navigate(url)
+			if extra_text:
+				try_to_launch_url_in_android(device_map, extra_text) # we do this first because the next line might throw
+				test_marionette_instance.navigate(url, extra_text)
+			else:
+				try_to_launch_url_in_android(device_map, url) # we do this first because the next line might throw
+				test_marionette_instance.navigate(url)
 		except:
 			print('\nerror loading %s, guess you need to move on to next bug..\n' % url)
 	elif choice == 's' or choice == 'su':
-		# I want a screenshot of the viewport. For this purpose, I consider that better than getting the full page
-		# However, WebDriver spec says implementations *should* do the full page thing, and AFAIK there's no convenient way
-		# to opt-in to only take the viewport..
-		overlay_elm = None
-		try:
-			test_marionette_instance.execute_script('(function(){var elm=document.createElement(\'overlay\');elm.setAttribute(\'style\', \'display:block; position:fixed;top:0;left:0;right:0;bottom:0\');document.body.appendChild(elm)})()')
-			overlay_elm = test_marionette_instance.find_elements('tag name', 'overlay')
-		except:
-			pass
-		if overlay_elm:
-			overlay_elm = overlay_elm[0]
-			img_data = base64.b64decode(test_marionette_instance.screenshot(element=overlay_elm))
+		if 'Android' in extra_text:
+			for device in device_map:
+				if device_map[device]['isAndroid']:
+					subprocess.call(['adb', '-s', device, 'shell', 'screencap', '/sdcard/screenshot.png'])
+					subprocess.call(['adb', '-s', device, 'pull', '/sdcard/screenshot.png', def_img_file])
+					break
 		else:
-			img_data = base64.b64decode(test_marionette_instance.screenshot())
-		f = open(def_img_file, 'wb')
-		f.write(img_data)
-		f.close()
+			# I want a screenshot of the viewport. For this purpose, I consider that better than getting the full page
+			# However, WebDriver spec says implementations *should* do the full page thing, and AFAIK there's no convenient way
+			# to opt-in to only take the viewport..
+			overlay_elm = None
+			try:
+				test_marionette_instance.execute_script('(function(){var elm=document.createElement(\'overlay\');elm.setAttribute(\'style\', \'display:block; position:fixed;top:0;left:0;right:0;bottom:0\');document.body.appendChild(elm)})()')
+				overlay_elm = test_marionette_instance.find_elements('tag name', 'overlay')
+			except:
+				pass
+			if overlay_elm:
+				overlay_elm = overlay_elm[0]
+				img_data = base64.b64decode(test_marionette_instance.screenshot(element=overlay_elm))
+			else:
+				img_data = base64.b64decode(test_marionette_instance.screenshot())
+			f = open(def_img_file, 'wb')
+			f.write(img_data)
+			f.close()
 		print 'Saved as %s' % def_img_file
 		if choice == 'su':
-			try:
-				marionette_desktop.find_element('css selector', 'a[href*="attachment.cgi?bugid=%s&action=enter"]' % bug_id ).click()
-				while 'attachment.cgi' not in marionette_desktop.get_url():
-					time.sleep(2)
-				wait_until_ready(marionette_desktop, 'input#data')
-				marionette_desktop.set_context(marionette_desktop.CONTEXT_CHROME)
-				marionette_desktop.execute_script('gBrowser.contentDocument.getElementById("data").value = "%s"' % def_img_file)
-				marionette_desktop.set_context(marionette_desktop.CONTEXT_CONTENT)
-				if extra_text:
+			if not extra_text:
+				extra_text = 'Screenshot from device'
+			if tracker == 'bugzilla':
+				try:
+					marionette_desktop.find_element('css selector', 'a[href*="attachment.cgi?bugid=%s&action=enter"]' % bug_id ).click()
+					while 'attachment.cgi' not in marionette_desktop.get_url():
+						time.sleep(2)
+					wait_until_ready(marionette_desktop, 'input#data')
+					marionette_desktop.set_context(marionette_desktop.CONTEXT_CHROME)
+					marionette_desktop.execute_script('gBrowser.contentDocument.getElementById("data").value = "%s"' % def_img_file)
+					marionette_desktop.set_context(marionette_desktop.CONTEXT_CONTENT)
 					marionette_desktop.execute_script('document.getElementById("description").value = "%s"' % extra_text)
-					#insert_comment(marionette_desktop, extra_text)
-				else:
-					marionette_desktop.execute_script('document.getElementById("description").value = "%s"' % "Screenshot from Flame smartphone")
-					#insert_comment(marionette_desktop, "Screenshot from Flame device")
-				marionette_desktop.execute_script('document.getElementById("create").click()')
-			except:
-				print 'Sorry, failed when attempting to upload a screenshot in Bugzilla'
+					marionette_desktop.execute_script('document.getElementById("create").click()')
+				except:
+					print 'Sorry, failed when attempting to upload a screenshot in Bugzilla'
+			elif tracker == 'webcompat' or tracker == 'github':
+				marionette_desktop.set_context(marionette_desktop.CONTEXT_CHROME)
+				marionette_desktop.execute_script('gBrowser.contentDocument.querySelector("%s").value = "%s"' % (selector_map[tracker]['upload_input'], def_img_file))
+				marionette_desktop.set_context(marionette_desktop.CONTEXT_CONTENT)
+				comment_field = marionette_desktop.find_element('css selector', selector_map[tracker]['comment_field'])
+				attempts = 11
+				while marionette_desktop.execute_script('return arguments[0].value', [comment_field]) == '' and attempts > 0:
+					attempts = attempts - 1
+					time.sleep(1)				
+				insert_comment(marionette_desktop, extra_text)
+				submit_bug_form(marionette_desktop)
+				
 	elif choice == 'rw' or choice == 'ri' or choice == 'rf':
 		resolutions = {'rw':'WORKSFORME', 'ri':'INVALID', 'rf': 'FIXED'}
+		#pdb.set_trace()
 		insert_comment(marionette_desktop, extra_text)
-		marionette_desktop.execute_script('document.getElementById("bug_status").value = "RESOLVED"')
-		marionette_desktop.execute_script('document.getElementById("resolution").value = "%s"' %  resolutions[choice])
-		submit_bug_form(marionette_desktop)
+		if tracker == 'bugzilla':
+			marionette_desktop.execute_script('document.getElementById("bug_status").value = "RESOLVED"')
+			marionette_desktop.execute_script('document.getElementById("resolution").value = "%s"' %  resolutions[choice])
+			submit_bug_form(marionette_desktop)
+		elif tracker == 'webcompat':
+			marionette_desktop.find_element('css selector', 'button.LabelEditor-launcher').click()
+			for other_status in ['needsdiagnosis', 'needscontact', 'needsinfo']:
+				try:
+					elm = marionette_desktop.find_element('css selector', 'input.LabelEditor-checkbox[name="%s"]' % other_status)
+					if elm.is_selected():
+						elm.click()
+				except Exception as e:
+					print(e)
+			marionette_desktop.find_element('css selector', 'input.LabelEditor-checkbox[name="%s"]' % resolutions[choice].lower()).click()
+			marionette_desktop.find_element('css selector', 'button.LabelEditor-btn').click()
+			submit_bug_form(marionette_desktop, True)
+		elif tracker == 'github':
+			marionette_desktop.find_element('css selector', 'div.label-select-menu>button.discussion-sidebar-heading.discussion-sidebar-toggle.js-menu-target>span.octicon').click()
+			wait_until_ready(marionette_desktop,  'input[name="issue\\[labels\\]\\[\\]"][value="status-worksforme"]')
+			for other_status in ['needsdiagnosis', 'needscontact', 'needsinfo']:
+				try:
+					elm = marionette_desktop.find_element('css selector', 'input[name="issue\\[labels\\]\\[\\]"][value="status-%s"]' % other_status)
+					if elm and elm.is_selected(): # hack: we've found a display:none checkbox, Marionette won't let us click() it. Find the next element..
+						elm = marionette_desktop.execute_script('arguments[0].nextElementSibling.scrollIntoView();return arguments[0].nextElementSibling', [elm])
+						elm.click()
+				except Exception as e:
+					print e
+			elm = marionette_desktop.find_element('css selector', 'input[name="issue\\[labels\\]\\[\\]"][value="status-%s"]' % resolutions[choice].lower())
+			elm = marionette_desktop.execute_script('arguments[0].nextElementSibling.scrollIntoView();return arguments[0].nextElementSibling', [elm])
+			elm.click()
+			marionette_desktop.find_element('css selector', 'div.label-select-menu span.octicon.octicon-x.js-menu-close').click()
+			submit_bug_form(marionette_desktop, True)
+		return # means no more menu recursion, i.e. load next bug..
 	elif choice == 'js':
 		if extra_text:
 			try:
 				print(test_marionette_instance.execute_script('return ' + extra_text))
+				try_to_launch_url_in_android(device_map, 'javascript:%s' % extra_text)
 			except:
 				print('That JS threw exception!')
 		else:
 			print('wot, you didn\'t type any code??')
 	elif choice == 'fc':
-		pdb.set_trace()
 		check_results = {}
 		look_for_contact_links(test_marionette_instance, check_results)
 		# Some sites have special pages dedicated to their social media presence, or limit contact info to the "about" page..
 		
-		for keyword in ['social', 'about', 'company', 'twitter', 'facebook']:
+		for keyword in ['social', 'about', 'company', 'contact', 'twitter', 'facebook']:
 			elm = find_elem(test_marionette_instance, {"selector": "*[href*='%s'" % keyword})
 			if elm:
 				test_marionette_instance.navigate(elm.get_attribute('href'))
@@ -371,10 +469,11 @@ Interact with the website if required,
 		contact_desc = []
 		for key in check_results.keys():
 			val = check_results[key]
-			if val:
+			print(val)
+			if val and 'url' in val:
 				contact_desc.append("%s: %s" % (key.capitalize(),val['url']))
-			if len(contact_desc):
-				insert_comment(marionette_desktop, "If we're going to contact them, here are some possible contact points:\n" + ("\n".join(contact_desc)))
+		if len(contact_desc):
+			insert_comment(marionette_desktop, "If we're going to contact them, here are some possible contact points:\n" + ("\n".join(contact_desc)))
 	elif choice == 'hc':
 		header_check_data = check_url(url)
 		if header_check_data:
@@ -394,40 +493,41 @@ Interact with the website if required,
 		if extra_text:
 			insert_comment(marionette_desktop, extra_text)
 			submit_bug_form(marionette_desktop)
-			try:
-				while marionette_desktop.find_element('tag', 'body').text.index('Changes submitted for bug') == -1:
-					time.sleep(1)
-			except Exception as e:
-				print e
-				time.sleep(10)
-		return # 'continue' means no more menu recursion..
+			if tracker == 'bugzilla':
+				try:
+					while marionette_desktop.find_element('tag name', 'body').text.index('Changes submitted for bug') == -1:
+						time.sleep(1)
+				except Exception as e:
+					print e
+					time.sleep(10)
+		return # means no more menu recursion..
 
-	return options_menu(test_marionette_instance, url, marionette_desktop)
+	return options_menu(test_marionette_instance, url, marionette_desktop, device_map)
 
 def insert_comment(marionette_instance, text):
 	tracker = bugtracker(marionette_instance)
-	text = text.replace('"', '\\"')
-	text = text.replace("\n", "\\n")
-	if tracker == 'bugzilla':
-		marionette_instance.execute_script('document.getElementById("comment").value="%s"' % text)
-	elif tracker == 'webcompat':
-		marionette_instance.execute_script('document.getElementById("Comment-text").value="%s"' % text)
-	elif tracker == 'github':
-		marionette_instance.execute_script('document.getElementsByName("comment[body]")[0].value="%s"' % text)
+	elm = marionette_instance.find_element('css selector', selector_map[tracker]['comment_field'])
+	if elm:
+		marionette_instance.execute_script('arguments[0].value = arguments[0].value.length ? arguments[0].value +\'\\n \'+ arguments[1] : arguments[1]', [elm, text])
 	else:
-		raise 'don\'t know how to find comment field on this bug tracker ' + url
+		raise 'don\'t know how to find comment field on this bug tracker ' + marionette_instance.get_url()
 
-def submit_bug_form(marionette_instance):
+def submit_bug_form(marionette_instance, close_bug=False):
 	tracker = bugtracker(marionette_instance)
-	if tracker == 'bugzilla':
-		marionette_instance.execute_script('document.getElementById("commit").click()')
-	elif tracker == 'webcompat':
-		marionette_instance.execute_script('document.getElementsByClassName("js-issue-comment-button")[0].click()')
-	elif tracker == 'github':
-		marionette_instance.execute_script('document.querySelector("button.button.primary").click()')
-	else:
-		raise 'don\'t know how to find submit button on this bug tracker ' + url
-
+	try:
+		if close_bug and 'submit_close_button' in selector_map[tracker]:
+			marionette_instance.execute_script('document.querySelector(arguments[0]).click()', [str(selector_map[tracker]['submit_close_button'])])
+			# There's a TODO in webcompat's source - we somehow trigger a code path that doesn't addd the comment..
+			if tracker == 'webcompat':
+				time.sleep(3)
+				marionette_instance.execute_script('document.querySelector(arguments[0]).click()', [str(selector_map[tracker]['submit_button'])])
+		else:
+			marionette_instance.execute_script('document.querySelector(arguments[0]).click()', [str(selector_map[tracker]['submit_button'])])
+		if tracker == 'github' or tracker == 'webcompat':
+			time.sleep(5) # TODO: find a better "done" indication
+	except Exception as e:
+		print 'don\'t know how to find submit button on this bug tracker ' + marionette_instance.get_url()
+		raise e
 
 def look_for_contact_links(m, check_results):
     # looking for mailto: links
@@ -536,7 +636,6 @@ UAS = {
     "fxa": "Mozilla/5.0 (Android; Mobile; rv:26.0) Gecko/26.0 Firefox/26.0"
 }
 
-
 def make_request(url, ua):
     session = requests.Session()
     session.headers.update({'User-Agent': ua})
@@ -619,6 +718,29 @@ def check_url(url, iteration=0, orig_url = ''):
 
     return output
 
+# Replace this value to push to different release channels.
+# Nightly = org.mozilla.fennec
+# Aurora = org.mozilla.fennec_aurora
+# Beta = org.mozilla.firefox_beta
+# Release = org.mozilla.firefox
+ANDROID_APP_ID='org.mozilla.fennec'
+
+# adb arguments. Needs the following strings interpolated:
+# ID of device (as given by "adb devices"
+# URL to open
+# ID of target app (see ANDROID_APP_ID above)
+ADB_ARGS = 'adb -s %s shell am start -a android.intent.action.VIEW  -c android.intent.category.DEFAULT -d %s  -n %s/.App'
+
+
+def try_to_launch_url_in_android(device_map, url):
+	try:
+		for device in device_map:
+			if device_map[device]['isAndroid']:
+				print(ADB_ARGS % (device,url,ANDROID_APP_ID))
+				shlex.split(ADB_ARGS % (device,url,ANDROID_APP_ID))
+				subprocess.call(shlex.split(ADB_ARGS % (device,url,ANDROID_APP_ID)), stderr=subprocess.PIPE, stdout=subprocess.PIPE)
+	except Exception, e:
+		print e
 
 
 if __name__ == '__main__':
