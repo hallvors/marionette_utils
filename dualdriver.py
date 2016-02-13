@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from marionette import Marionette
 from marionette_driver import wait, errors
+from marionette_driver.errors import NoSuchElementException
 import base64, json, re, os, subprocess, shlex, time, urlparse, argparse
 import pdb
 import requests
@@ -193,6 +194,8 @@ def get_device_map():
 			# Firefox OS "Flame" and "something else"
 			device_data[m.group(1)]['isFxOS'] = 'flame' in device_data[m.group(1)]['product']
 			device_data[m.group(1)]['isAndroid'] = not device_data[m.group(1)]['isFxOS']
+	print('Detected devices: ')
+	print(device_data)
 	return device_data
 
 def set_proxy_server(marionette_instance, ip, port):
@@ -299,9 +302,10 @@ Interact with the website if required,
   * press SS, SA or SF to change UA to Safari, Android and Fx OS respectively
   * press R to reload, U for initial URL, U new_url to load a different URL
   * S for screenshot,
-  * SU [description] to add screenshot to bug,
+  * SU [description] to add screenshot to bug (magic word "Android" in description),
   * FC to look for contact points, HC to check headers,
   * JS code(); to run JS and see output,
+  * L somelabel to apply this label to the issue (whiteboard on Bugzilla, [ ] are added)
   * RW [comment] to resolve WORKSFORME, RI [comment] for INVALID, RF [comment] for fixed
   * PROXY ip:port to set a proxy - PROXY without arguments to remove
   * press I [reason] to ignore bug for testing, C [comment] to comment and continue
@@ -414,37 +418,12 @@ Interact with the website if required,
 		#pdb.set_trace()
 		insert_comment(marionette_desktop, extra_text)
 		if tracker == 'bugzilla':
-			marionette_desktop.execute_script('document.getElementById("bug_status").value = "RESOLVED"')
-			marionette_desktop.execute_script('document.getElementById("resolution").value = "%s"' %  resolutions[choice])
+			set_label_or_status(marionette_desktop, resolutions[choice])
 			submit_bug_form(marionette_desktop)
-		elif tracker == 'webcompat':
-			marionette_desktop.find_element('css selector', 'button.LabelEditor-launcher').click()
-			for other_status in ['needsdiagnosis', 'needscontact', 'needsinfo']:
-				try:
-					elm = marionette_desktop.find_element('css selector', 'input.LabelEditor-checkbox[name="%s"]' % other_status)
-					if elm.is_selected():
-						elm.click()
-				except Exception as e:
-					print(e)
-			marionette_desktop.find_element('css selector', 'input.LabelEditor-checkbox[name="%s"]' % resolutions[choice].lower()).click()
-			marionette_desktop.find_element('css selector', 'button.LabelEditor-btn').click()
+		else:
+			set_label_or_status(marionette_desktop, resolutions[choice].lower())
 			submit_bug_form(marionette_desktop, True)
-		elif tracker == 'github':
-			marionette_desktop.find_element('css selector', 'div.label-select-menu>button.discussion-sidebar-heading.discussion-sidebar-toggle.js-menu-target>span.octicon').click()
-			wait_until_ready(marionette_desktop,  'input[name="issue\\[labels\\]\\[\\]"][value="status-worksforme"]')
-			for other_status in ['needsdiagnosis', 'needscontact', 'needsinfo']:
-				try:
-					elm = marionette_desktop.find_element('css selector', 'input[name="issue\\[labels\\]\\[\\]"][value="status-%s"]' % other_status)
-					if elm and elm.is_selected(): # hack: we've found a display:none checkbox, Marionette won't let us click() it. Find the next element..
-						elm = marionette_desktop.execute_script('arguments[0].nextElementSibling.scrollIntoView();return arguments[0].nextElementSibling', [elm])
-						elm.click()
-				except Exception as e:
-					print e
-			elm = marionette_desktop.find_element('css selector', 'input[name="issue\\[labels\\]\\[\\]"][value="status-%s"]' % resolutions[choice].lower())
-			elm = marionette_desktop.execute_script('arguments[0].nextElementSibling.scrollIntoView();return arguments[0].nextElementSibling', [elm])
-			elm.click()
-			marionette_desktop.find_element('css selector', 'div.label-select-menu span.octicon.octicon-x.js-menu-close').click()
-			submit_bug_form(marionette_desktop, True)
+
 		return # means no more menu recursion, i.e. load next bug..
 	elif choice == 'js':
 		if extra_text:
@@ -488,6 +467,9 @@ Interact with the website if required,
 				print('ERROR: wrong arguments to proxy command - try ip:port')
 		else:
 			set_proxy_server(test_marionette_instance, None, None)
+	elif choice == 'l':
+		if extra_text:
+			set_label_or_status(marionette_desktop, extra_text)
 	elif choice == 'c':
 		#pdb.set_trace()
 		if extra_text:
@@ -505,10 +487,11 @@ Interact with the website if required,
 	return options_menu(test_marionette_instance, url, marionette_desktop, device_map)
 
 def insert_comment(marionette_instance, text):
+	print('insert_comment called')
 	tracker = bugtracker(marionette_instance)
 	elm = marionette_instance.find_element('css selector', selector_map[tracker]['comment_field'])
 	if elm:
-		marionette_instance.execute_script('arguments[0].value = arguments[0].value.length ? arguments[0].value +\'\\n \'+ arguments[1] : arguments[1]', [elm, text])
+		marionette_instance.execute_script('arguments[0].value = arguments[0].value.length && arguments[0].value !== arguments[1] ? arguments[0].value +\'\\n \'+ arguments[1] : arguments[1]', [elm, text])
 	else:
 		raise 'don\'t know how to find comment field on this bug tracker ' + marionette_instance.get_url()
 
@@ -658,7 +641,7 @@ def dump(response, output):
 def check_url(url, iteration=0, orig_url = ''):
     responses = []
     if re.search('^/', url) and orig_url != '': # We're redirected to a relative URL..
-        url = urljoin(orig_url, url)
+        url = url.join(orig_url, url)
     for ua in UAS.itervalues():
         response = make_request(url, ua)
         responses.append(response)
@@ -717,6 +700,60 @@ def check_url(url, iteration=0, orig_url = ''):
         return []
 
     return output
+
+def set_label_or_status(marionette_instance, labelstr):
+	tracker = bugtracker(marionette_instance)
+	# Minor issue: labelstr is sometimes uppercased (for Bugzilla status), but we don't use 'labelstr in statuslabels' for this case
+	statuslabels = ['needsdiagnosis', 'needscontact', 'needsinfo', 'invalid', 'worksforme', 'duplicate', 'wontfix', 'contactready', 'sitewait', 'fixed']
+	if tracker == 'webcompat':
+		marionette_instance.find_element('css selector', 'button.LabelEditor-launcher').click()
+		if labelstr in statuslabels:
+			for other_status in statuslabels:
+				try:
+					elm = marionette_instance.find_element('css selector', 'input.LabelEditor-checkbox[name="%s"]' % other_status)
+					if elm.is_selected():
+						elm.click()
+				except Exception as e:
+					print(e)
+		try:
+			marionette_instance.find_element('css selector', 'input.LabelEditor-checkbox[name="%s"]' % labelstr.lower()).click()
+		except NoSuchElementException as e:
+			print('No such label: %s' % labelstr)
+		marionette_instance.find_element('css selector', 'button.LabelEditor-btn').click()
+	elif tracker == 'github':
+		marionette_instance.find_element('css selector', 'div.label-select-menu>button.discussion-sidebar-heading.discussion-sidebar-toggle.js-menu-target>span.octicon').click()
+		wait_until_ready(marionette_instance,  'input[name="issue\\[labels\\]\\[\\]"][value="status-worksforme"]')
+		if labelstr in statuslabels:
+			for other_status in ['needsdiagnosis', 'needscontact', 'needsinfo']:
+				try:
+					elm = marionette_instance.find_element('css selector', 'input[name="issue\\[labels\\]\\[\\]"][value="status-%s"]' % other_status)
+					if elm and elm.is_selected(): # hack: we've found a display:none checkbox, Marionette won't let us click() it. Find the next element..
+						elm = marionette_instance.execute_script('arguments[0].nextElementSibling.scrollIntoView();return arguments[0].nextElementSibling', [elm])
+						elm.click()
+				except Exception as e:
+					print e
+		try:
+			elm = marionette_instance.find_element('css selector', 'input[name="issue\\[labels\\]\\[\\]"][value="status-%s"]' % labelstr.lower())
+		except NoSuchElementException as e:
+			print('No such label: %s' % labelstr)
+		elm = marionette_instance.execute_script('arguments[0].nextElementSibling.scrollIntoView();return arguments[0].nextElementSibling', [elm])
+		elm.click()
+		marionette_instance.find_element('css selector', 'div.label-select-menu span.octicon.octicon-x.js-menu-close').click()
+	elif tracker == 'bugzilla':
+		# whiteboard or real status?
+		whiteboardlabels = ['needsdiagnosis', 'needscontact', 'needsinfo','contactready', 'sitewait']
+		if labelstr in whiteboardlabels:
+			whiteboard = marionette_instance.find_element('css selector', 'input[id="status_whiteboard"]')
+			current_value = marionette_instance.execute_script('return arguments[0].value', [whiteboard])
+			# mutually exclusive..
+			for thislabel in whiteboardlabels:
+				if "[%s]" % thislabel in current_value:
+					current_value = current_value.replace("[%s]" % thislabel, '')
+			current_value = "%s [%s]" % (current_value, labelstr)
+			current_value = marionette_instance.execute_script('return arguments[0].value = arguments[1]', [whiteboard, current_value.strip()])
+		else:
+			marionette_desktop.execute_script('document.getElementById("bug_status").value = "RESOLVED"')
+			marionette_desktop.execute_script('document.getElementById("resolution").value = "%s"' %  labelstr)
 
 # Replace this value to push to different release channels.
 # Nightly = org.mozilla.fennec
