@@ -30,11 +30,11 @@ selector_map = {
 		"url_ref":"#bz_url_edit_container a"
 	},
 	"webcompat":{
-		"bug_links": "p.wc-IssueItem-header a",
-		"comment_field":"textarea.wc-Comment-wrapper.wc-Comment-text",
-		"submit_button": "button.js-issue-comment-button",
-		"submit_close_button": "button.js-issue-state-button",
-		"url_ref": "div.wc-IssueDetail-details a",
+		"bug_links": "header.wc-IssueList-header a",
+		"comment_field":"textarea.wc-Comment-wrapper.js-Comment-text",
+		"submit_button": "button.js-Issue-comment-button",
+		"submit_close_button": "button.js-Issue-state-button",
+		"url_ref": "div.wc-Issue-details a",
 		"upload_input": "input#image"
 	},
 	"github":{
