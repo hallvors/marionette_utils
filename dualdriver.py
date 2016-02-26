@@ -706,20 +706,20 @@ def set_label_or_status(marionette_instance, labelstr):
 	# Minor issue: labelstr is sometimes uppercased (for Bugzilla status), but we don't use 'labelstr in statuslabels' for this case
 	statuslabels = ['needsdiagnosis', 'needscontact', 'needsinfo', 'invalid', 'worksforme', 'duplicate', 'wontfix', 'contactready', 'sitewait', 'fixed']
 	if tracker == 'webcompat':
-		marionette_instance.find_element('css selector', 'button.LabelEditor-launcher').click()
+		marionette_instance.find_element('css selector', 'button.js-LabelEditorLauncher').click()
 		if labelstr in statuslabels:
 			for other_status in statuslabels:
 				try:
-					elm = marionette_instance.find_element('css selector', 'input.LabelEditor-checkbox[name="%s"]' % other_status)
+					elm = marionette_instance.find_element('css selector', 'input.LabelEditor-list-item-checkbox[name="%s"]' % other_status)
 					if elm.is_selected():
 						elm.click()
 				except Exception as e:
 					print(e)
 		try:
-			marionette_instance.find_element('css selector', 'input.LabelEditor-checkbox[name="%s"]' % labelstr.lower()).click()
+			marionette_instance.find_element('css selector', 'input.LabelEditor-list-item-checkbox[name="%s"]' % labelstr.lower()).click()
 		except NoSuchElementException as e:
 			print('No such label: %s' % labelstr)
-		marionette_instance.find_element('css selector', 'button.LabelEditor-btn').click()
+		marionette_instance.find_element('css selector', 'button.wc-LabelEditor-button').click()
 	elif tracker == 'github':
 		marionette_instance.find_element('css selector', 'div.label-select-menu>button.discussion-sidebar-heading.discussion-sidebar-toggle.js-menu-target>span.octicon').click()
 		wait_until_ready(marionette_instance,  'input[name="issue\\[labels\\]\\[\\]"][value="status-worksforme"]')
