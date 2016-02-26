@@ -707,14 +707,6 @@ def set_label_or_status(marionette_instance, labelstr):
 	statuslabels = ['needsdiagnosis', 'needscontact', 'needsinfo', 'invalid', 'worksforme', 'duplicate', 'wontfix', 'contactready', 'sitewait', 'fixed']
 	if tracker == 'webcompat':
 		marionette_instance.find_element('css selector', 'button.js-LabelEditorLauncher').click()
-		if labelstr in statuslabels:
-			for other_status in statuslabels:
-				try:
-					elm = marionette_instance.find_element('css selector', 'input.LabelEditor-list-item-checkbox[name="%s"]' % other_status)
-					if elm.is_selected():
-						elm.click()
-				except Exception as e:
-					print(e)
 		try:
 			marionette_instance.find_element('css selector', 'input.LabelEditor-list-item-checkbox[name="%s"]' % labelstr.lower()).click()
 		except NoSuchElementException as e:
